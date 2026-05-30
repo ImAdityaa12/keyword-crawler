@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: yt-keyword-crawler
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: KEYWORD
+        value: lofi hip hop
+      - key: CRAWL_INTERVAL_MINUTES
+        value: "5"
+      - key: MAX_PAGES_PER_CRAWL
+        value: "2"
+      - key: PHASH_THRESHOLD
+        value: "5"
+      - key: PORT
+        value: "8000"

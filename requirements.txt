@@ -1,9 +1,0 @@
-fastapi
-uvicorn[standard]
-apscheduler
-httpx
-imagehash
-pillow
-python-dotenv
-redis
-sqlalchemy
