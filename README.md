@@ -99,6 +99,8 @@ npm run phash:demo -- <imageA-url-or-path> <imageB-url-or-path>   # compare two 
 | `RESULTS_PER_PAGE`       | `25`           | results per page (1–50)                    |
 | `RUN_ON_STARTUP`         | `true`         | crawl immediately on boot                  |
 | `PHASH_THRESHOLD`        | `5`            | max Hamming distance to treat as duplicate |
+| `MAX_SEEN_RECORDS`       | `50000`        | cap on the dedup index; oldest evicted FIFO (`0` = unlimited) |
+| `PERSIST_DEBOUNCE_MS`    | `1000`         | batch window for JSON writes (`0` = write immediately) |
 | `REDIS_URL`              | —              | use Redis instead of in-memory if set      |
 | `DATA_DIR`               | `data`         | where JSON persistence is written          |
 | `PORT`                   | `8000`         | HTTP port                                  |
@@ -110,6 +112,24 @@ npm run phash:demo -- <imageA-url-or-path> <imageB-url-or-path>   # compare two 
   against every previously seen hash. A re-upload keeps the same thumbnail, so its
   hash lands within `PHASH_THRESHOLD` of the original and the item is **not**
   queued again, even though the URL / videoId differ.
+
+## Memory & scaling (what happens when "seen" gets large)
+
+The dedup index grows with every unique video. Left unbounded it would eventually
+exhaust the Node heap (in-memory) or Redis memory. This is handled by:
+
+- **Bounded index** — `seen` is capped at `MAX_SEEN_RECORDS` and evicts the
+  oldest records FIFO. The in-memory store bounds the Node heap; the Redis store
+  bounds the key via `LTRIM` (and keeps the id set in sync). Set `0` to disable.
+- **Idempotent recording** — a `videoId` is recorded once, so re-seeing the same
+  video on later crawls no longer grows the index.
+- **Batched persistence** — writes are debounced (`PERSIST_DEBOUNCE_MS`) instead
+  of rewriting the whole JSON file on every add, and flushed on shutdown
+  (`SIGINT`/`SIGTERM`). Each flush is still atomic (write-then-rename).
+
+For an index far larger than the default cap, replace the linear pHash scan in
+`findDuplicate` with band-bucketed (pigeonhole/LSH) lookup, and when using Redis
+set `maxmemory` with an eviction policy so the server itself can't OOM.
 
 ## Deploy (live URL)
 

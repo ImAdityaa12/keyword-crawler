@@ -17,6 +17,12 @@ export const config = {
   resultsPerPage: Math.min(Math.max(int('RESULTS_PER_PAGE', 25), 1), 50),
   runOnStartup: (process.env.RUN_ON_STARTUP ?? 'true').toLowerCase() === 'true',
   phashThreshold: int('PHASH_THRESHOLD', 5),
+  // Cap on the dedup index ("seen") so memory can't grow without bound.
+  // Oldest records are evicted FIFO once the cap is exceeded. 0 = unlimited.
+  maxSeenRecords: Math.max(int('MAX_SEEN_RECORDS', 50_000), 0),
+  // Debounce window (ms) for flushing the in-memory store to JSON. Batches
+  // many writes into one file rewrite instead of rewriting on every add.
+  persistDebounceMs: Math.max(int('PERSIST_DEBOUNCE_MS', 1000), 0),
   redisUrl: process.env.REDIS_URL ?? '',
   dataDir: process.env.DATA_DIR ?? 'data',
   port: int('PORT', 8000),

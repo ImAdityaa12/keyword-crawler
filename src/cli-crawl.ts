@@ -8,6 +8,7 @@ async function main(): Promise<void> {
   const stats = await runCrawl(store);
   console.log(JSON.stringify(stats, null, 2));
   console.log(`\nqueue size now: ${await store.queueSize()}  (seen: ${await store.seenCount()})`);
+  await store.close(); // flush buffered writes before exiting
   process.exit(0);
 }
 

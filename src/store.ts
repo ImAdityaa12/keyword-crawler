@@ -1,6 +1,6 @@
 import { config } from './config';
 import { hammingDistance } from './phash';
-import { readJson, writeJson } from './persistence';
+import { readJson, DebouncedWriter } from './persistence';
 
 export interface QueueItem {
   videoId: string;
@@ -39,6 +39,8 @@ export interface Store {
   queueSize(): Promise<number>;
   seenCount(): Promise<number>;
   backend(): string;
+  /** Flush any buffered writes and release resources (called on shutdown). */
+  close(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -47,12 +49,21 @@ export interface Store {
 
 export class MemoryStore implements Store {
   private queue: QueueItem[] = [];
+  // `seen` is the FIFO dedup index. It is bounded by config.maxSeenRecords so
+  // the heap can't grow without limit; oldest records are evicted first.
   private seen: SeenRecord[] = [];
   private seenIds = new Set<string>();
+  private writer = new DebouncedWriter(config.persistDebounceMs);
 
   async init(): Promise<void> {
     this.queue = readJson<QueueItem[]>('queue.json', []);
-    this.seen = readJson<SeenRecord[]>('seen.json', []);
+    // De-dup any repeated videoIds from legacy files (older versions appended a
+    // record per crawl), keeping each id's latest record and original order.
+    const loaded = readJson<SeenRecord[]>('seen.json', []);
+    const byId = new Map<string, SeenRecord>();
+    for (const r of loaded) byId.set(r.videoId, r);
+    this.seen = [...byId.values()];
+    this.enforceCap();
     this.seenIds = new Set(this.seen.map((s) => s.videoId));
   }
 
@@ -65,6 +76,8 @@ export class MemoryStore implements Store {
       return { reason: 'exact-videoId', matchedVideoId: videoId };
     }
     if (phash) {
+      // Linear scan, now bounded by maxSeenRecords. For a much larger index,
+      // bucket phashes by band (pigeonhole/LSH) to avoid the full scan.
       for (const s of this.seen) {
         if (!s.phash) continue;
         const d = hammingDistance(s.phash, phash);
@@ -77,14 +90,34 @@ export class MemoryStore implements Store {
   }
 
   async addSeen(rec: SeenRecord): Promise<void> {
+    // Idempotent: a videoId is recorded once. (The crawler re-calls this for
+    // duplicates; without this guard the index would grow on every crawl.)
+    if (this.seenIds.has(rec.videoId)) return;
     this.seen.push(rec);
     this.seenIds.add(rec.videoId);
-    writeJson('seen.json', this.seen);
+    this.evictOverflow();
+    this.writer.schedule('seen.json', this.seen);
+  }
+
+  // Drop the single new overflow record (called after each add).
+  private evictOverflow(): void {
+    if (config.maxSeenRecords <= 0) return;
+    while (this.seen.length > config.maxSeenRecords) {
+      const evicted = this.seen.shift();
+      if (evicted) this.seenIds.delete(evicted.videoId);
+    }
+  }
+
+  // Trim a bulk overflow (e.g. after loading a large file or a lowered cap).
+  private enforceCap(): void {
+    if (config.maxSeenRecords > 0 && this.seen.length > config.maxSeenRecords) {
+      this.seen.splice(0, this.seen.length - config.maxSeenRecords);
+    }
   }
 
   async enqueue(item: QueueItem): Promise<void> {
     this.queue.push(item);
-    writeJson('queue.json', this.queue);
+    this.writer.schedule('queue.json', this.queue);
   }
 
   async getQueue(): Promise<QueueItem[]> {
@@ -100,7 +133,12 @@ export class MemoryStore implements Store {
   }
 
   backend(): string {
-    return 'memory (persisted to ' + config.dataDir + ')';
+    const cap = config.maxSeenRecords > 0 ? `cap ${config.maxSeenRecords}` : 'uncapped';
+    return `memory (persisted to ${config.dataDir}, ${cap})`;
+  }
+
+  async close(): Promise<void> {
+    this.writer.flush();
   }
 }
 
@@ -149,8 +187,27 @@ export class RedisStore implements Store {
   }
 
   async addSeen(rec: SeenRecord): Promise<void> {
-    await this.redis.sadd(SEEN_IDS_KEY, rec.videoId);
+    // sadd returns 0 if the id was already present -> idempotent, and keeps the
+    // phash list from accumulating a duplicate entry on every crawl.
+    const added = await this.redis.sadd(SEEN_IDS_KEY, rec.videoId);
+    if (added === 0) return;
     await this.redis.rpush(SEEN_PHASH_KEY, `${rec.videoId}|${rec.phash}`);
+
+    if (config.maxSeenRecords <= 0) return;
+    // Bound the index FIFO so Redis memory can't grow without limit. Capture the
+    // ids being evicted so the membership set stays consistent with the list.
+    const len: number = await this.redis.llen(SEEN_PHASH_KEY);
+    if (len > config.maxSeenRecords) {
+      const overflow = len - config.maxSeenRecords;
+      const victims: string[] = await this.redis.lrange(SEEN_PHASH_KEY, 0, overflow - 1);
+      const victimIds = victims
+        .map((e) => e.slice(0, e.indexOf('|')))
+        .filter((v) => v);
+      const multi = this.redis.multi();
+      multi.ltrim(SEEN_PHASH_KEY, overflow, -1);
+      if (victimIds.length) multi.srem(SEEN_IDS_KEY, ...victimIds);
+      await multi.exec();
+    }
   }
 
   async enqueue(item: QueueItem): Promise<void> {
@@ -171,7 +228,12 @@ export class RedisStore implements Store {
   }
 
   backend(): string {
-    return 'redis';
+    const cap = config.maxSeenRecords > 0 ? `cap ${config.maxSeenRecords}` : 'uncapped';
+    return `redis (${cap})`;
+  }
+
+  async close(): Promise<void> {
+    if (this.redis) await this.redis.quit();
   }
 }
 

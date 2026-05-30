@@ -61,6 +61,23 @@ async function main(): Promise<void> {
   });
   console.log(`[sched] crawling every ${config.crawlIntervalMinutes} min (cron "${expr}")`);
 
+  // Flush buffered writes / close connections cleanly on shutdown so we don't
+  // lose the last debounce window of the queue or dedup index.
+  let shuttingDown = false;
+  const shutdown = async (signal: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[exit] ${signal} — flushing store`);
+    try {
+      await store.close();
+    } catch (err) {
+      console.error('[exit] error closing store:', (err as Error).message);
+    }
+    process.exit(0);
+  };
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+
   if (config.runOnStartup) {
     void doCrawl();
   }
