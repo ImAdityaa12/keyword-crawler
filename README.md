@@ -1,20 +1,17 @@
-# Task 5 — Keyword Crawler + Dedup (TypeScript)
+# YouTube Keyword Crawler + Dedup (TypeScript)
 
-A scheduled service that polls the **YouTube Data API v3** for a keyword every N
-minutes, perceptually hashes each result's thumbnail, dedups against everything
-seen, and queues only the **new** uploads. A re-upload of the same content (same
-thumbnail, different URL / videoId) is caught by the hash and never queued twice.
-
-> Built in **TypeScript / Node (Express + node-cron)** instead of FastAPI, as
-> requested. FastAPI is Python-only; the Python stack was mapped to Node
-> equivalents and the behavior + `/queue` contract are unchanged. Full mapping is
-> in `AI_LOG.md`.
+A scheduled TypeScript service that polls the **YouTube Data API v3** for a
+keyword every N minutes, computes a **perceptual hash (pHash)** of each result's
+thumbnail, deduplicates against everything seen, and queues only the **new**
+uploads. A re-upload of the same content (same thumbnail, different URL / videoId)
+is caught by the hash and never queued twice. The queue is exposed at `GET /queue`.
 
 ## What it does
 
 - Every N minutes, queries the YouTube Data API v3 for a configurable keyword.
-- For each result: fetches the thumbnail, computes a **perceptual hash (pHash)**,
-  and **dedups** against everything seen so far.
+- Pages through the results and handles the API quota gracefully.
+- For each result: fetches the thumbnail, computes a **pHash**, and **dedups**
+  against everything seen so far.
 - Pushes only **new** items to a queue (in-memory or Redis) and persists them.
 - Exposes `GET /queue`.
 
@@ -22,12 +19,12 @@ thumbnail, different URL / videoId) is caught by the hash and never queued twice
 
 | Role               | Library                  |
 | ------------------ | ------------------------ |
-| HTTP server/routes | Express (TypeScript)     |
+| Language / runtime | TypeScript on Node 18+   |
+| HTTP server/routes | Express                  |
 | Scheduler          | node-cron                |
 | HTTP client        | axios                    |
 | Perceptual hash    | Jimp + custom DCT pHash  |
 | Queue/persistence  | in-memory + JSON / Redis |
-| Language/runtime   | TypeScript on Node 18+   |
 
 ## Requirements
 
@@ -78,7 +75,7 @@ curl http://localhost:8000/stats           # per-crawl metrics + history
 
 ```bash
 npm run crawl:once     # run a single crawl and print the stats, then exit
-npm run test:dedup     # build + prove a re-upload is caught (same image, re-encoded)
+npm run test:dedup     # prove a re-upload is caught (same image, re-encoded)
 npm run phash:demo -- <imageA-url-or-path> <imageB-url-or-path>   # compare two images
 ```
 
@@ -106,7 +103,7 @@ npm run phash:demo -- <imageA-url-or-path> <imageB-url-or-path>   # compare two 
 | `DATA_DIR`               | `data`         | where JSON persistence is written          |
 | `PORT`                   | `8000`         | HTTP port                                  |
 
-## How dedup works (the scored part)
+## How dedup works
 
 - **Exact**: a `videoId` already seen is skipped.
 - **Perceptual**: the thumbnail's DCT pHash is compared by Hamming distance
@@ -125,13 +122,6 @@ On Render / Railway / Fly:
 
 The scheduler runs in-process, so once the service is up the crawl fires on the
 deployed host automatically — no separate cron needed.
-
-## Deliver
-
-1. This repo (public GitHub, real commit history).
-2. A **live URL** with the scheduler running.
-3. `RESULTS.md` filled in (queue filling across crawls + a deduped re-upload).
-4. `AI_LOG.md` filled in.
 
 ## Hard requirements (and where they're handled)
 
@@ -152,7 +142,7 @@ src/
   youtube.ts       search.list pagination + quota handling + thumbnail fetch
   store.ts         queue + dedup index (MemoryStore | RedisStore)
   persistence.ts   crash-safe JSON read/write
-  crawler.ts       one crawl pass (search → hash → dedup → enqueue)
+  crawler.ts       one crawl pass (search -> hash -> dedup -> enqueue)
   server.ts        Express routes
   index.ts         scheduler + server bootstrap
   cli-crawl.ts     run one crawl from the CLI
